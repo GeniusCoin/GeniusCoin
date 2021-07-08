@@ -1,8 +1,4 @@
 /**
- * Submitted for verification at BscScan.com on 2021-08-06
-*/
-
-/**
  * Hi Genius Squad !
  * Please read this contract carefully, everything clear inside, all informations are provided 😉
  * All project related wallet will be locked (Genius, Liquidity & Reserve)
@@ -459,6 +455,7 @@ abstract contract Ownable is Context {
 }
 
 abstract contract OwnableGeniusCoin is Ownable {
+    bool public walletUpdateRenounced = false;
     address private _lockedLiquidity;
     address payable private _genius;
     address payable private _marketing;
@@ -505,13 +502,17 @@ abstract contract OwnableGeniusCoin is Ownable {
         _;
     }
 
+    function renounceWalletUpdate() public onlyOwner() {
+        walletUpdateRenounced = true;
+    }
+
     function setLockedLiquidityAddress(address liquidityAddress) public virtual onlyOwner {
-        require(_lockedLiquidity == address(0), "Locked liquidity address cannot be changed once set");
+        require(walletUpdateRenounced == false, "Locked Liquidity address cannot be changed anymore");
         _lockedLiquidity = liquidityAddress;
     }
 
     function setGeniusAddress(address payable geniusAddress) public virtual onlyOwner {
-        require(_genius == address(0), "Genius address cannot be changed once set");
+        require(walletUpdateRenounced == false, "Genius address cannot be changed anymore");
         _genius = geniusAddress;
     }
 
@@ -752,6 +753,12 @@ contract GeniusCoin is IERC20, OwnableGeniusCoin {
     mapping (address => bool) private _isExcluded;
     address[] private _excluded;
 
+    mapping (address => bool) private _isInTransferWhitelist;
+    address[] private _transferWhitelist;
+    mapping (address => bool) private _isInTransferBlacklist;
+    address[] private _transferBlacklist;
+    bool public transferAllowanceRenounced = false;
+
     uint256 private constant MAX = ~uint256(0);
     uint256 private _tTotal = 100 * 10**9 * 10**9;
     uint256 private _rTotal = (MAX - (MAX % _tTotal));
@@ -774,9 +781,10 @@ contract GeniusCoin is IERC20, OwnableGeniusCoin {
     uint256 private _liquidityFee = TOTAL_LIQUIDITY_FEE;
     uint256 private _previousLiquidityFee = TOTAL_LIQUIDITY_FEE;
 
-    IUniswapV2Router02 public immutable uniswapV2Router;
-    address public immutable uniswapV2Pair;
-    address public constant PANCAKE_ROUTER_ADDRESS = 0x05fF2B0DB69458A0750badebc4f9e13aDd608C7F;
+    IUniswapV2Router02 public uniswapV2Router;
+    address public uniswapV2Pair;
+    address public uniRouterAddress;
+    address public constant DEFAULT_PANCAKE_ROUTER = 0x10ED43C718714eb63d5aA57B78B54704E256024E;
 
     bool inSwapAndLiquify;
     bool public swapAndLiquifyEnabled = false;
@@ -810,22 +818,36 @@ contract GeniusCoin is IERC20, OwnableGeniusCoin {
         setICOContractAddress(deployer);
         _rOwned[deployer] = _rTotal;
 
-        IUniswapV2Router02 _uniswapV2Router = IUniswapV2Router02(PANCAKE_ROUTER_ADDRESS);
-         // Create a uniswap pair for this new token
-        uniswapV2Pair = IUniswapV2Factory(_uniswapV2Router.factory())
-            .createPair(address(this), _uniswapV2Router.WETH());
-
-        // Set the rest of the contract variables
-        uniswapV2Router = _uniswapV2Router;
+        // Setup PancakeSwap
+        configurePancakeSwapRouter(DEFAULT_PANCAKE_ROUTER);
 
         // Exclude owner and this contract from fee
         _isExcludedFromFee[owner()] = true;
         _isExcludedFromFee[address(this)] = true;
         _isExcludedFromFee[burn()] = true;
+        excludeFromReward(burn());
 
         emit Transfer(address(0), deployer, _tTotal);
     }
 
+    function setPancakeSwapRouter(address _uniRouterAddress) public onlyOwner {
+        uniRouterAddress = _uniRouterAddress;
+        uniswapV2Router = IUniswapV2Router02(_uniRouterAddress);
+    }
+
+    function createPancakePair() public onlyOwner {
+        uniswapV2Pair = IUniswapV2Factory(uniswapV2Router.factory())
+            .createPair(address(this), uniswapV2Router.WETH());
+    }
+
+    function setPancakePair(address _uniswapV2Pair) public onlyOwner {
+        uniswapV2Pair = _uniswapV2Pair;
+    }
+
+    function configurePancakeSwapRouter(address _uniRouterAddress) public onlyOwner {
+        setPancakeSwapRouter(_uniRouterAddress);
+        createPancakePair();
+    }
 
     function initLiquidity(uint256 tokenAmount, uint256 amountBNB) public onlyICOContract {
         return addLiquidity(tokenAmount, amountBNB);
@@ -891,6 +913,18 @@ contract GeniusCoin is IERC20, OwnableGeniusCoin {
         return _isExcluded[account];
     }
 
+    function isInTransferWhitelist(address account) public view returns (bool) {
+        if (_transferWhitelist.length > 0)
+            return _isInTransferWhitelist[account];
+        return true;
+    }
+
+    function isInTransferBlacklist(address account) public view returns (bool) {
+        if (_transferBlacklist.length > 0)
+            return _isInTransferBlacklist[account];
+        return false;
+    }
+
     function totalFees() public view returns (uint256) {
         return _tFeeTotal;
     }
@@ -950,7 +984,6 @@ contract GeniusCoin is IERC20, OwnableGeniusCoin {
     }
 
     function excludeFromReward(address account) public onlyOwner() {
-        // Require(account != 0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D, 'We can not exclude Uniswap router.');
         require(!_isExcluded[account], "Account is already excluded");
         if (_rOwned[account] > 0) {
             _tOwned[account] = tokenFromReflection(_rOwned[account]);
@@ -967,6 +1000,60 @@ contract GeniusCoin is IERC20, OwnableGeniusCoin {
                 _tOwned[account] = 0;
                 _isExcluded[account] = false;
                 _excluded.pop();
+                break;
+            }
+        }
+    }
+
+    function renounceTransferAllowance() public onlyOwner() {
+        transferAllowanceRenounced = true;
+    }
+
+    function transferWhitelistAdd(address account) public onlyOwner() {
+        require(transferAllowanceRenounced == false, "Transfer allowance functions are disabled");
+        require(!_isInTransferWhitelist[account], "Account is already in whitelist");
+        _isInTransferWhitelist[account] = true;
+        _transferWhitelist.push(account);
+    }
+
+    function transferWhitelistRemove(address account) public onlyOwner() {
+        require(_isInTransferWhitelist[account], "Account is already removes from whitelist");
+        for (uint256 i = 0; i < _transferWhitelist.length; i++) {
+            if (_transferWhitelist[i] == account) {
+                _transferWhitelist[i] = _transferWhitelist[_transferWhitelist.length - 1];
+                _isInTransferWhitelist[account] = false;
+                _transferWhitelist.pop();
+                break;
+            }
+        }
+    }
+
+    function transferWhitelistRemoveICO() public onlyICOContract() {
+        require(_isInTransferWhitelist[_msgSender()], "Account is already excluded");
+        for (uint256 i = 0; i < _transferWhitelist.length; i++) {
+            if (_transferWhitelist[i] == _msgSender()) {
+                _transferWhitelist[i] = _transferWhitelist[_transferWhitelist.length - 1];
+                _isInTransferWhitelist[_msgSender()] = false;
+                _transferWhitelist.pop();
+                break;
+            }
+        }
+    }
+
+    function transferBlacklistAdd(address account) public onlyOwner() {
+        require(transferAllowanceRenounced == false, "Transfer allowance functions are disabled");
+        require(!_isInTransferBlacklist[account], "Account is already in blacklist");
+        _isInTransferBlacklist[account] = true;
+        _transferBlacklist.push(account);
+    }
+
+    function transferBlacklistRemove(address account) public onlyOwner() {
+        require(_isInTransferBlacklist[account], "Account is already removes from blacklist");
+        for (uint256 i = 0; i < _transferBlacklist.length; i++) {
+            if (_transferBlacklist[i] == account) {
+                _transferBlacklist[i] = _transferBlacklist[_transferBlacklist.length - 1];
+                _isInTransferBlacklist[account] = false;
+                _transferBlacklist.pop();
                 break;
             }
         }
@@ -1085,6 +1172,12 @@ contract GeniusCoin is IERC20, OwnableGeniusCoin {
         require(owner != address(0), "ERC20: approve from the zero address");
         require(spender != address(0), "ERC20: approve to the zero address");
 
+        if (_transferWhitelist.length > 0)
+            require(_isInTransferWhitelist[owner], "The account address cannot approve an amount.");
+
+        if (_transferBlacklist.length > 0)
+            require(_isInTransferBlacklist[owner] != true, "The account address cannot approve an amount.");
+
         _allowances[owner][spender] = amount;
         emit Approval(owner, spender, amount);
     }
@@ -1101,6 +1194,12 @@ contract GeniusCoin is IERC20, OwnableGeniusCoin {
         require(amount > 0, "Transfer amount must be greater than zero");
         if (from != owner() && to != owner())
             require(amount <= _maxTxAmount, "Transfer amount exceeds the maxTxAmount.");
+
+        if (_transferWhitelist.length > 0)
+            require(_isInTransferWhitelist[from], "The account address cannot send tokens.");
+
+        if (_transferBlacklist.length > 0)
+            require(_isInTransferBlacklist[from] != true, "The account address cannot send tokens.");
 
         // Is the token balance of this contract address over the min number of
         // tokens that we need to initiate a swap + liquidity lock?
@@ -1155,6 +1254,15 @@ contract GeniusCoin is IERC20, OwnableGeniusCoin {
 
     function marketingToCollectLater() public view returns (uint256) {
         return _marketingToCollectLater;
+    }
+
+    function exedentBNB() public view returns (uint256) {
+        return address(this).balance.sub(_geniusToCollectLater).sub(_marketingToCollectLater);
+    }
+
+    function emergencyExtract(address payable to, uint256 amountToExtract) external onlyOwner {
+        require(amountToExtract <= exedentBNB(), "Nothing to extract");
+        to.transfer(amountToExtract);
     }
 
     function swapAndLiquify() private lockTheSwap {
@@ -1306,8 +1414,7 @@ contract GeniusCoinCrowdsale is Ownable {
 
     uint256 public constant BNB_DEC = 10 ** 18;
     uint256 public constant BNB_MIN_BUY = 2 * BNB_DEC / 10;
-    uint256 public constant BNB_MAX_BUY = 5 * BNB_DEC;
-    uint256 public constant BNB_FUNDING_SOFT_CAP = 2000 * BNB_DEC;
+    uint256 public constant BNB_FUNDING_SOFT_CAP = 0;
     uint256 public constant BNB_FUNDING_GOAL = 20000 * BNB_DEC;
 
     address[] public participants;
@@ -1319,10 +1426,11 @@ contract GeniusCoinCrowdsale is Ownable {
 
         // LP tokens burned forever
         _geniusCoinToken.setLockedLiquidityAddress(_geniusCoinToken.burn());
-        // Exclude UniswapV2Pair from rewards & fees
-        _geniusCoinToken.excludeFromReward(_geniusCoinToken.getUniswapV2Pair());
-        _geniusCoinToken.excludeFromFee(_geniusCoinToken.getUniswapV2Pair());
 
+        // Allow transfer only for ICO contract
+        _geniusCoinToken.transferWhitelistAdd(address(this));
+
+        _geniusCoinToken.excludeFromFee(_msgSender());
         _geniusCoinToken.transferOwnership(_msgSender());
 
         uint256 _tokenFundingGoal = _geniusCoinToken.totalSupply().mul(TTOTAL_PERCENT_PRESALE).div(10**2);
@@ -1359,21 +1467,8 @@ contract GeniusCoinCrowdsale is Ownable {
                 }
             }
         } else { // Otherwise, add liquidity to router and burn LP
-            for (uint256 i = 0; i < participants.length; i++) { // send tokens to participants
-                uint256 _payoutAmount = _amountTokenForBNB(balances[participants[i]]);
-                uint256 _tokensRemaining = _geniusCoinToken.balanceOf(address(this));
-                if (_tokensRemaining > 0 && _payoutAmount > 0 && _payoutAmount <= _tokensRemaining) {
-                    if (_geniusCoinToken.transfer(participants[i], _payoutAmount)) {
-                        balances[participants[i]] = 0;
-                    }
-
-                } else  {
-                    if (_payoutAmount > 0) {
-                        payable(participants[i]).transfer(balances[participants[i]]);
-                        balances[participants[i]] = 0;
-                    }
-                }
-            }
+            // Allow transfer for all
+            _geniusCoinToken.transferWhitelistRemoveICO();
 
             uint256 _totalBNBRaised = address(this).balance;
 
@@ -1426,9 +1521,7 @@ contract GeniusCoinCrowdsale is Ownable {
         require(block.timestamp < _endTime, "Presale is over");
 
         _usedBNB = _sendedBNB;
-        if (_sendedBNB > BNB_MAX_BUY) {
-            _usedBNB = BNB_MAX_BUY;
-        } else if (_sendedBNB < BNB_MIN_BUY) {
+        if (_sendedBNB < BNB_MIN_BUY) {
             _usedBNB = 0;
         }
 
@@ -1466,6 +1559,11 @@ contract GeniusCoinCrowdsale is Ownable {
 
         // Save the BNB amount deposited
         balances[_msgSender()] = balances[_msgSender()].add(_usedBNB);
+
+        // Send the GENIUS
+        if (_tokensToBuy > 0) {
+            _geniusCoinToken.transfer(_msgSender(), _tokensToBuy);
+        }
 
         // Increase the tokens raised
         _tokensRaised = _tokensRaised.add(_tokensToBuy);
